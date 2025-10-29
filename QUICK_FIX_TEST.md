@@ -72,10 +72,10 @@ adb -s 1901092534000358 logcat -s RecordingService:D MediaEncoder:E GraphicBuffe
 
 ```bash
 # 查看文件
-adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
 
 # 导出到电脑
-adb -s 1901092534000358 pull /sdcard/Movies/ARRecorder/AR_Recording_*.mp4 .
+adb -s 1901092534000358 pull /sdcard/Movies/Camera/AR_Recording_*.mp4 .
 
 # 播放验证
 open AR_Recording_*.mp4
@@ -125,7 +125,7 @@ RecordingService: Stopping recording in service
 MediaEncoder: Stopping encoding
 MediaEncoder: Video EOS signaled          ← 只出现一次
 MediaEncoder: Audio EOS signaled          ← 只出现一次
-RecordingService: Recording saved: /sdcard/Movies/ARRecorder/AR_Recording_20251028_215900.mp4
+RecordingService: Recording saved: /sdcard/Movies/Camera/AR_Recording_20251028_215900.mp4
 ```
 
 ---

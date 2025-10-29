@@ -452,6 +452,6 @@ init() → start() → [encode frames] → signalEOS() → stop() → release()
 
 5. **检查视频**：
    ```bash
-   adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+   adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
    ```
 

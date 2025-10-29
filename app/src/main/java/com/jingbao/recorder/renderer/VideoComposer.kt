@@ -18,14 +18,16 @@ class VideoComposer(private val config: RecordingConfig) {
     companion object {
         private const val TAG = "VideoComposer"
         
-        // 顶点着色器
+        // 顶点着色器（应用 SurfaceTexture 的纹理变换矩阵）
         private const val VERTEX_SHADER = """
+            uniform mat4 uTexMatrix;
             attribute vec4 aPosition;
             attribute vec4 aTextureCoord;
             varying vec2 vTextureCoord;
             void main() {
                 gl_Position = aPosition;
-                vTextureCoord = aTextureCoord.xy;
+                vec4 tex = uTexMatrix * vec4(aTextureCoord.xy, 0.0, 1.0);
+                vTextureCoord = tex.xy;
             }
         """
         
@@ -68,10 +70,18 @@ class VideoComposer(private val config: RecordingConfig) {
     private var cameraTextureId = 0
     private var screenSurfaceTexture: SurfaceTexture? = null
     private var cameraSurfaceTexture: SurfaceTexture? = null
+    private val screenTexMatrix = FloatArray(16)
+    private val cameraTexMatrix = FloatArray(16)
     
     // 顶点缓冲
     private var vertexBuffer: FloatBuffer? = null
     private var textureBuffer: FloatBuffer? = null
+    // 是否启用屏幕输入（当 MediaProjection 不可用时关闭）
+    private var screenInputEnabled: Boolean = true
+    private var cameraInputWidth: Int = 0
+    private var cameraInputHeight: Int = 0
+    private var frameCount: Long = 0L
+    private var frameDurationNs: Long = 0L
     
     /**
      * 初始化 EGL 和 OpenGL
@@ -82,6 +92,11 @@ class VideoComposer(private val config: RecordingConfig) {
         
         initEGL()
         initGL()
+    }
+
+    fun disableScreenInput() {
+        Log.d(TAG, "Disabling screen input in VideoComposer")
+        screenInputEnabled = false
     }
     
     /**
@@ -174,7 +189,9 @@ class VideoComposer(private val config: RecordingConfig) {
         cameraSurfaceTexture = SurfaceTexture(cameraTextureId)
         val cameraWidth = (config.videoWidth * config.pipWidthRatio).toInt()
         val cameraHeight = (config.videoHeight * config.pipHeightRatio).toInt()
-        cameraSurfaceTexture?.setDefaultBufferSize(cameraWidth, cameraHeight)
+        cameraInputWidth = cameraWidth
+        cameraInputHeight = cameraHeight
+        cameraSurfaceTexture?.setDefaultBufferSize(cameraInputWidth, cameraInputHeight)
         
         // 初始化顶点缓冲
         vertexBuffer = ByteBuffer.allocateDirect(FULL_RECTANGLE_COORDS.size * 4)
@@ -195,6 +212,10 @@ class VideoComposer(private val config: RecordingConfig) {
         // 启用混合（用于透明度）
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        
+        // 严格 CFR 的时间戳（按帧序号计算）
+        frameDurationNs = if (config.videoFps > 0) (1_000_000_000L / config.videoFps) else 33_333_333L
+        frameCount = 0L
         
         Log.d(TAG, "OpenGL initialized")
     }
@@ -254,6 +275,15 @@ class VideoComposer(private val config: RecordingConfig) {
     fun getCameraSurface(): Surface {
         return Surface(cameraSurfaceTexture)
     }
+
+    fun resizeCameraInput(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        if (width == cameraInputWidth && height == cameraInputHeight) return
+        cameraInputWidth = width
+        cameraInputHeight = height
+        cameraSurfaceTexture?.setDefaultBufferSize(width, height)
+        Log.d(TAG, "Camera input resized to ${width}x${height}")
+    }
     
     /**
      * 渲染一帧（合成屏幕和摄像头画面）
@@ -265,8 +295,12 @@ class VideoComposer(private val config: RecordingConfig) {
         }
         
         // 更新纹理
-        screenSurfaceTexture?.updateTexImage()
+        if (screenInputEnabled) {
+            screenSurfaceTexture?.updateTexImage()
+            screenSurfaceTexture?.getTransformMatrix(screenTexMatrix)
+        }
         cameraSurfaceTexture?.updateTexImage()
+        cameraSurfaceTexture?.getTransformMatrix(cameraTexMatrix)
         
         // 清空画布
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
@@ -274,13 +308,25 @@ class VideoComposer(private val config: RecordingConfig) {
         
         GLES20.glUseProgram(shaderProgram)
         
-        // 1. 渲染屏幕（全屏）
-        drawTexture(screenTextureId, FULL_RECTANGLE_COORDS)
+        // 1. 渲染屏幕（全屏），当屏幕输入不可用时仅使用清屏色
+        if (screenInputEnabled) {
+            drawTexture(screenTextureId, FULL_RECTANGLE_COORDS, screenTexMatrix)
+        }
         
-        // 2. 渲染摄像头（画中画，右下角）
-        val pipCoords = calculatePipCoordinates()
-        drawTexture(cameraTextureId, pipCoords)
+        // 2. 渲染摄像头
+        val cameraCoords = if (screenInputEnabled) {
+            // 画中画，右下角
+            calculatePipCoordinates()
+        } else {
+            // 屏幕输入禁用时，摄像头全屏
+            FULL_RECTANGLE_COORDS
+        }
+        drawTexture(cameraTextureId, cameraCoords, cameraTexMatrix)
         
+        // 严格按帧序号的 CFR 时间戳
+        val presentationTimeNs = frameCount * frameDurationNs
+        frameCount += 1
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentationTimeNs)
         // 交换缓冲区
         EGL14.eglSwapBuffers(eglDisplay, eglSurface)
         
@@ -312,7 +358,7 @@ class VideoComposer(private val config: RecordingConfig) {
     /**
      * 绘制纹理
      */
-    private fun drawTexture(textureId: Int, vertexCoords: FloatArray) {
+    private fun drawTexture(textureId: Int, vertexCoords: FloatArray, texMatrix: FloatArray) {
         // 更新顶点坐标
         val vb = ByteBuffer.allocateDirect(vertexCoords.size * 4)
             .order(ByteOrder.nativeOrder())
@@ -333,6 +379,10 @@ class VideoComposer(private val config: RecordingConfig) {
         GLES20.glEnableVertexAttribArray(texCoordHandle)
         GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
         
+        // 纹理矩阵（纠正旋转/镜像/裁切）
+        val texMatrixHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexMatrix")
+        GLES20.glUniformMatrix4fv(texMatrixHandle, 1, false, texMatrix, 0)
+
         // 设置纹理采样器
         val textureHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexture")
         GLES20.glUniform1i(textureHandle, 0)

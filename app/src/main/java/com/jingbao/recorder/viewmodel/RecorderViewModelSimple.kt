@@ -139,22 +139,20 @@ class RecorderViewModelSimple : ViewModel() {
             if (resolveInfo != null) {
                 launcher.launch(intent)
             } else {
-                // Rokid 设备可能没有标准的权限界面，直接使用默认权限
-                Log.w(TAG, "MediaProjection permission activity not found, using default permission")
-                // 模拟权限授予（Rokid 设备可能自动授予）
-                onScreenCaptureResult(context, Activity.RESULT_OK, intent)
+                // 在某些定制设备上（如 Rokid），系统可能没有标准的权限 Activity，
+                // 但实际允许直接使用 MediaProjection。尝试直接走授权回调。
+                try {
+                    Log.w(TAG, "MediaProjection permission activity not found; trying direct grant path")
+                    onScreenCaptureResult(context, Activity.RESULT_OK, intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Direct grant path failed; falling back to camera-only", e)
+                    _errorMessage.value = "设备不支持屏幕录制授权，已降级为仅摄像头录制"
+                    RecordingService.startCameraOnly(context)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to request screen capture permission", e)
-            // 尝试直接启动（Rokid 可能不需要显式权限）
-            try {
-                val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                val intent = projectionManager.createScreenCaptureIntent()
-                onScreenCaptureResult(context, Activity.RESULT_OK, intent)
-            } catch (e2: Exception) {
-                _errorMessage.value = "Rokid 设备不支持标准屏幕录制权限流程"
-                Log.e(TAG, "Cannot start recording on this device", e2)
-            }
+            _errorMessage.value = "无法请求屏幕录制权限，已降级为仅摄像头录制"
         }
     }
     

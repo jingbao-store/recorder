@@ -12,18 +12,18 @@ enum class RecordingState {
 
 /**
  * 录制配置
- * 针对 Rokid 眼镜优化（480x640 屏幕）
+ * 默认参数尽量对齐官方视频（可按设备能力调整）
  */
 data class RecordingConfig(
-    // 视频配置 - 适配 Rokid 小屏幕
-    val videoWidth: Int = 480,         // Rokid 屏幕宽度
-    val videoHeight: Int = 640,        // Rokid 屏幕高度
+    // 视频配置 - 对齐官方：2400x1800@30fps，~11 Mbps（设备不支持时可下调）
+    val videoWidth: Int = 2400,
+    val videoHeight: Int = 1800,
     val videoFps: Int = 30,
-    val videoBitrate: Int = 4_000_000, // 4 Mbps（降低以适配性能）
+    val videoBitrate: Int = 11_000_000,
     
-    // 音频配置
-    val audioSampleRate: Int = 44100,
-    val audioBitrate: Int = 128_000,   // 128 kbps
+    // 音频配置 - 对齐官方：16 kHz, 96 kbps, 单声道
+    val audioSampleRate: Int = 16000,
+    val audioBitrate: Int = 96_000,
     val audioChannels: Int = 1,        // 单声道
     
     // 画中画配置（右下角）

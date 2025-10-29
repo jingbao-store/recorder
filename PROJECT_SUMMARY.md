@@ -162,7 +162,7 @@ com.google.accompanist:accompanist-permissions:0.36.0
   ↓
 用户停止录制
   ↓
-保存视频文件（/Movies/ARRecorder/）
+保存视频文件（/Movies/Camera/）
 ```
 
 ## 配置参数
@@ -263,16 +263,16 @@ cd /Users/zhangrunsheng/Documents/GitHub/rokid/recorder
 
 5. **停止录制**
    - 点击白色方形按钮
-   - 视频保存在 `/Movies/ARRecorder/`
+   - 视频保存在 `/Movies/Camera/` (与 photoView4rokidglasses 兼容)
 
 ### 查看录制的视频
 
 ```bash
 # 列出所有录制的视频
-adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
 
 # 拉取视频到电脑
-adb -s 1901092534000358 pull /sdcard/Movies/ARRecorder/AR_Recording_*.mp4 ./
+adb -s 1901092534000358 pull /sdcard/Movies/Camera/AR_Recording_*.mp4 ./
 ```
 
 ## 测试检查清单

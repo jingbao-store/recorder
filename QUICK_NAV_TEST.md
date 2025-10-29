@@ -93,7 +93,7 @@
 **预期结果**：
 - ✅ 录制停止
 - ✅ 显示"录制完成"
-- ✅ 视频保存到 `/sdcard/Movies/ARRecorder/`
+- ✅ 视频保存到 `/sdcard/Movies/Camera/` (与 photoView4rokidglasses 兼容)
 
 **通过标准**：
 - [ ] 录制停止

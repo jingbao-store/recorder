@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.media.MediaCodecList
 import android.util.Log
 import android.view.Surface
 import com.jingbao.recorder.model.RecordingConfig
@@ -21,7 +22,8 @@ class MediaEncoder(
     
     companion object {
         private const val TAG = "MediaEncoder"
-        private const val MIME_TYPE_VIDEO = MediaFormat.MIMETYPE_VIDEO_AVC // H.264
+        private const val MIME_TYPE_VIDEO_HEVC = MediaFormat.MIMETYPE_VIDEO_HEVC
+        private const val MIME_TYPE_VIDEO_AVC = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val MIME_TYPE_AUDIO = MediaFormat.MIMETYPE_AUDIO_AAC
         private const val IFRAME_INTERVAL = 1 // I 帧间隔（秒）
         private const val TIMEOUT_US = 10000L // 10ms
@@ -38,6 +40,7 @@ class MediaEncoder(
     private var audioEOSSent = false
     
     private var inputSurface: Surface? = null
+    private var orientationHintDegrees: Int = 180 // 播放器层旋转 180°，修正整体倒置
     
     /**
      * 初始化编码器
@@ -53,6 +56,10 @@ class MediaEncoder(
         
         // 创建 MediaMuxer
         mediaMuxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        // 方向元数据（需在 start() 前设置）
+        try {
+            mediaMuxer?.setOrientationHint(orientationHintDegrees)
+        } catch (_: Throwable) {}
         
         Log.d(TAG, "MediaEncoder initialized")
     }
@@ -61,17 +68,36 @@ class MediaEncoder(
      * 初始化视频编码器
      */
     private fun initVideoEncoder() {
-        val format = MediaFormat.createVideoFormat(MIME_TYPE_VIDEO, config.videoWidth, config.videoHeight)
+        val chosenMime = chooseVideoMime()
+        val format = MediaFormat.createVideoFormat(chosenMime, config.videoWidth, config.videoHeight)
         
         // 配置编码参数
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         format.setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, config.videoFps)
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, IFRAME_INTERVAL)
+        // 显式设置色彩信息，贴近官方（BT.709 + LIMITED）
+        try {
+            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+        } catch (_: Throwable) {}
+        // 档位：HEVC Main 或 AVC High
+        try {
+            if (chosenMime == MIME_TYPE_VIDEO_HEVC) {
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+            } else {
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            }
+        } catch (_: Throwable) {}
+        // 码率模式 VBR
+        try {
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+        } catch (_: Throwable) {}
         
-        Log.d(TAG, "Video format: ${config.videoWidth}x${config.videoHeight} @ ${config.videoFps}fps, bitrate: ${config.videoBitrate}")
+        Log.d(TAG, "Video format: ${config.videoWidth}x${config.videoHeight} @ ${config.videoFps}fps, bitrate: ${config.videoBitrate}, mime: $chosenMime")
         
-        videoEncoder = MediaCodec.createEncoderByType(MIME_TYPE_VIDEO)
+        videoEncoder = MediaCodec.createEncoderByType(chosenMime)
         videoEncoder?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         
         // 获取输入 Surface
@@ -80,20 +106,30 @@ class MediaEncoder(
         videoEncoder?.start()
         Log.d(TAG, "Video encoder started")
     }
+
+    private fun chooseVideoMime(): String {
+        return try {
+            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+            val infos = codecList.codecInfos
+            val hevcSupported = infos.any { info ->
+                info.isEncoder && info.supportedTypes.any { it.equals(MIME_TYPE_VIDEO_HEVC, ignoreCase = true) }
+            }
+            if (hevcSupported) MIME_TYPE_VIDEO_HEVC else MIME_TYPE_VIDEO_AVC
+        } catch (_: Throwable) {
+            MIME_TYPE_VIDEO_AVC
+        }
+    }
     
     /**
      * 初始化音频编码器
      */
     private fun initAudioEncoder() {
-        val channelConfig = if (config.audioChannels == 1) {
-            AudioFormat.CHANNEL_IN_MONO
-        } else {
-            AudioFormat.CHANNEL_IN_STEREO
-        }
-        
         val format = MediaFormat.createAudioFormat(MIME_TYPE_AUDIO, config.audioSampleRate, config.audioChannels)
         format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
         format.setInteger(MediaFormat.KEY_BIT_RATE, config.audioBitrate)
+        // 某些设备需要显式设置最大输入大小，避免输入缓冲区过小导致频繁溢出
+        val bytesPerSecond = config.audioSampleRate * config.audioChannels * 2
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, bytesPerSecond / 2)
         
         Log.d(TAG, "Audio format: ${config.audioSampleRate}Hz, ${config.audioChannels} channels, bitrate: ${config.audioBitrate}")
         
@@ -132,20 +168,41 @@ class MediaEncoder(
         val encoder = audioEncoder ?: return
         
         try {
-            // 获取输入缓冲区
-            val inputBufferIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
-            if (inputBufferIndex >= 0) {
+            // 将源数据复制到编码器输入缓冲区（按块写入，避免溢出）
+            val src = audioData.duplicate()
+            // 将 position 复位到 0，limit 保持来表示有效数据长度
+            src.position(0)
+            var consumedBytes = 0
+            val bytesPerSecond = config.audioSampleRate * config.audioChannels * 2 // 16-bit PCM
+            while (src.hasRemaining()) {
+                val inputBufferIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
+                if (inputBufferIndex < 0) {
+                    break
+                }
                 val inputBuffer = encoder.getInputBuffer(inputBufferIndex)
-                inputBuffer?.clear()
-                inputBuffer?.put(audioData)
+                if (inputBuffer == null) {
+                    encoder.releaseOutputBuffer(inputBufferIndex, false)
+                    break
+                }
+                inputBuffer.clear()
+                val bytesToWrite = minOf(src.remaining(), inputBuffer.remaining())
+                // 临时限制 src，写入后恢复
+                val oldLimit = src.limit()
+                src.limit(src.position() + bytesToWrite)
+                inputBuffer.put(src)
+                src.limit(oldLimit)
                 
+                val chunkPtsUs = presentationTimeUs + if (bytesPerSecond > 0) {
+                    (consumedBytes.toLong() * 1_000_000L) / bytesPerSecond
+                } else 0L
                 encoder.queueInputBuffer(
                     inputBufferIndex,
                     0,
-                    audioData.remaining(),
-                    presentationTimeUs,
+                    bytesToWrite,
+                    chunkPtsUs,
                     0
                 )
+                consumedBytes += bytesToWrite
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error encoding audio data", e)

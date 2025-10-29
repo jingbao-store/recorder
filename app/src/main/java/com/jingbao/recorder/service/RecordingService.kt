@@ -17,6 +17,8 @@ import com.jingbao.recorder.recorder.CameraRecorder
 import com.jingbao.recorder.recorder.ScreenRecorder
 import com.jingbao.recorder.renderer.VideoComposer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.CloseableCoroutineDispatcher
+import kotlinx.coroutines.newSingleThreadContext
 import java.io.File
 import android.os.Environment
 import java.text.SimpleDateFormat
@@ -41,6 +43,7 @@ class RecordingService : Service() {
         
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
+        const val EXTRA_CAMERA_ONLY = "extra_camera_only"
         
         const val BROADCAST_RECORDING_STATE = "com.jingbao.recorder.RECORDING_STATE"
         const val BROADCAST_RECORDING_DURATION = "com.jingbao.recorder.RECORDING_DURATION"
@@ -57,6 +60,18 @@ class RecordingService : Service() {
                 action = ACTION_START
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_RESULT_DATA, data)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun startCameraOnly(context: Context) {
+            val intent = Intent(context, RecordingService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_CAMERA_ONLY, true)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -93,6 +108,7 @@ class RecordingService : Service() {
     private var renderJob: Job? = null
     private var timerJob: Job? = null
     private var outputFile: File? = null
+    private var glDispatcher: CloseableCoroutineDispatcher? = null
     
     override fun onCreate() {
         super.onCreate()
@@ -111,15 +127,20 @@ class RecordingService : Service() {
         
         when (intent?.action) {
             ACTION_START -> {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
-                val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
-                
-                if (data != null) {
-                    startRecordingInternal(resultCode, data)
+                val cameraOnly = intent.getBooleanExtra(EXTRA_CAMERA_ONLY, false)
+                if (cameraOnly) {
+                    startRecordingInternal(Activity.RESULT_CANCELED, null)
                 } else {
-                    Log.e(TAG, "MediaProjection data is null")
-                    broadcastError("启动录制失败：缺少屏幕录制权限数据")
-                    stopSelf()
+                    val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+                    val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+                    
+                    if (data != null) {
+                        startRecordingInternal(resultCode, data)
+                    } else {
+                        Log.e(TAG, "MediaProjection data is null")
+                        broadcastError("启动录制失败：缺少屏幕录制权限数据")
+                        stopSelf()
+                    }
                 }
             }
             ACTION_STOP -> {
@@ -139,12 +160,14 @@ class RecordingService : Service() {
         Log.d(TAG, "Service destroyed")
         stopRecordingInternal()
         serviceScope.cancel()
+        glDispatcher?.close()
+        glDispatcher = null
     }
     
     /**
      * 启动录制（内部实现）
      */
-    private fun startRecordingInternal(resultCode: Int, data: Intent) {
+    private fun startRecordingInternal(resultCode: Int, data: Intent?) {
         serviceScope.launch {
             try {
                 Log.d(TAG, "Starting recording in service")
@@ -156,6 +179,20 @@ class RecordingService : Service() {
                 // 创建输出文件
                 outputFile = createOutputFile()
                 
+                // 先尝试初始化屏幕录制；若失败，则降级为仅摄像头+音频
+                var screenInputEnabled = true
+                if (data != null && resultCode == Activity.RESULT_OK) {
+                    try {
+                        screenRecorder?.init(resultCode, data)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "ScreenRecorder init failed, will disable screen input", e)
+                        screenInputEnabled = false
+                    }
+                } else {
+                    Log.w(TAG, "Screen capture permission not provided, camera-only mode")
+                    screenInputEnabled = false
+                }
+                
                 // ✅ 初始化 AudioRecorder（在后台线程）
                 audioRecorder?.init()
                 
@@ -165,41 +202,55 @@ class RecordingService : Service() {
                     start()
                 }
                 
-                // 初始化 VideoComposer
+                // 初始化 VideoComposer（在单线程 GL 调度器上创建并绑定 EGL）
                 val encoderSurface = mediaEncoder?.getInputSurface()
                 if (encoderSurface == null) {
                     throw RuntimeException("Failed to get encoder surface")
                 }
-                
-                videoComposer = VideoComposer(config).apply {
-                    init(encoderSurface)
+                if (glDispatcher == null) {
+                    glDispatcher = newSingleThreadContext("GLRenderer")
+                }
+                withContext(glDispatcher!!) {
+                    videoComposer = VideoComposer(config).apply {
+                        init(encoderSurface)
+                        if (!screenInputEnabled) {
+                            disableScreenInput()
+                        }
+                    }
                 }
                 
-                // 启动屏幕录制
-                screenRecorder?.init(resultCode, data)
-                screenRecorder?.startCapture(
-                    videoComposer!!.getScreenSurface(),
-                    config.videoWidth,
-                    config.videoHeight
-                )
+                // 若屏幕输入可用，则启动屏幕捕获
+                if (screenInputEnabled) {
+                    screenRecorder?.startCapture(
+                        videoComposer!!.getScreenSurface(),
+                        config.videoWidth,
+                        config.videoHeight
+                    )
+                }
                 
-                // 启动摄像头录制（在主线程）
+                // 启动摄像头录制（在主线程）：在 CameraX 就绪回调中启动，避免 provider 未就绪
                 handler.post {
-                    // CameraX 需要 LifecycleOwner，这里使用 ProcessLifecycleOwner
-                    cameraRecorder?.init(androidx.lifecycle.ProcessLifecycleOwner.get()) {
+                    val lifecycleOwner = androidx.lifecycle.ProcessLifecycleOwner.get()
+                    val cameraSurface = videoComposer!!.getCameraSurface()
+                    cameraRecorder?.init(lifecycleOwner) {
                         Log.d(TAG, "Camera ready in service")
-                    }
-                    
-                    // 短暂延迟后启动摄像头捕获
-                    handler.postDelayed({
+                        val reqW = if (screenInputEnabled) (config.videoWidth * config.pipWidthRatio).toInt() else config.videoWidth
+                        val reqH = if (screenInputEnabled) (config.videoHeight * config.pipHeightRatio).toInt() else config.videoHeight
                         cameraRecorder?.startCapture(
-                            androidx.lifecycle.ProcessLifecycleOwner.get(),
-                            videoComposer!!.getCameraSurface(),
-                            (config.videoWidth * config.pipWidthRatio).toInt(),
-                            (config.videoHeight * config.pipHeightRatio).toInt(),
+                            lifecycleOwner,
+                            cameraSurface,
+                            reqW,
+                            reqH,
                             useFrontCamera = true
-                        )
-                    }, 500)
+                        ) { agreedW, agreedH ->
+                            // 同步摄像头输入 SurfaceTexture 的默认缓冲尺寸，避免 abandoned
+                            glDispatcher?.let { dispatcher ->
+                                serviceScope.launch(dispatcher) {
+                                    videoComposer?.resizeCameraInput(agreedW, agreedH)
+                                }
+                            }
+                        }
+                    }
                 }
                 
                 // 启动音频录制
@@ -212,7 +263,7 @@ class RecordingService : Service() {
                 recordingStartTime = System.currentTimeMillis()
                 broadcastState("RECORDING")
                 
-                // 启动渲染循环
+                // 启动渲染循环（在 GL 单线程上）
                 startRenderLoop()
                 
                 // 启动定时器更新通知
@@ -251,7 +302,9 @@ class RecordingService : Service() {
                 
                 // 停止所有录制
                 audioRecorder?.stopRecording()
-                cameraRecorder?.stopCapture()
+                withContext(Dispatchers.Main) {
+                    cameraRecorder?.stopCapture()
+                }
                 screenRecorder?.stopCapture()
                 
                 // 停止编码器
@@ -259,9 +312,16 @@ class RecordingService : Service() {
                 mediaEncoder?.release()
                 mediaEncoder = null
                 
-                // 释放 VideoComposer
-                videoComposer?.release()
-                videoComposer = null
+                // 释放 VideoComposer（在 GL 单线程上）
+                glDispatcher?.let { dispatcher ->
+                    withContext(dispatcher) {
+                        videoComposer?.release()
+                        videoComposer = null
+                    }
+                } ?: run {
+                    videoComposer?.release()
+                    videoComposer = null
+                }
                 
                 // 更新状态
                 isRecording = false
@@ -297,7 +357,12 @@ class RecordingService : Service() {
      * 启动渲染循环
      */
     private fun startRenderLoop() {
-        renderJob = serviceScope.launch {
+        val dispatcher = glDispatcher
+        if (dispatcher == null) {
+            Log.e(TAG, "GL dispatcher not initialized; cannot start render loop")
+            return
+        }
+        renderJob = serviceScope.launch(dispatcher) {
             val frameIntervalMs = 1000L / config.videoFps
             
             while (isActive && isRecording) {
@@ -337,21 +402,23 @@ class RecordingService : Service() {
     
     /**
      * 创建输出文件
+     * 存储在 DIRECTORY_MOVIES/Camera 目录下，与 photoView4rokidglasses 兼容
      */
     private fun createOutputFile(): File {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val fileName = "AR_Recording_$timestamp.mp4"
         
-        val moviesDir = File(
+        // 使用 DIRECTORY_MOVIES/Camera，与相机录制内容存储在同一位置
+        val cameraDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-            "ARRecorder"
+            "Camera"
         )
         
-        if (!moviesDir.exists()) {
-            moviesDir.mkdirs()
+        if (!cameraDir.exists()) {
+            cameraDir.mkdirs()
         }
         
-        val file = File(moviesDir, fileName)
+        val file = File(cameraDir, fileName)
         Log.d(TAG, "Output file: ${file.absolutePath}")
         return file
     }

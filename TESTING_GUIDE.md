@@ -76,11 +76,11 @@ adb -s 1901092534000358 push app/build/outputs/apk/debug/app-debug.apk /sdcard/D
 6. **视频文件**
    - [ ] 检查视频是否生成
    ```bash
-   adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+   adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
    ```
    - [ ] 拉取视频到电脑查看
    ```bash
-   adb -s 1901092534000358 pull /sdcard/Movies/ARRecorder/ ./recordings/
+   adb -s 1901092534000358 pull /sdcard/Movies/Camera/AR_Recording_*.mp4 ./recordings/
    ```
    - [ ] 播放视频，检查：
      - 屏幕内容是否正常录制

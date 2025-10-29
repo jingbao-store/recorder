@@ -204,7 +204,7 @@ IllegalStateException at signalEndOfInputStream
 
 **检查视频文件**：
 ```bash
-adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
 ```
 
 应该显示新生成的 MP4 文件，大小 > 0。
@@ -338,10 +338,10 @@ adb -s 1901092534000358 logcat | grep -i "recorder\|anr\|eos"
 
 ```bash
 # 查看文件列表
-adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
 
 # 导出视频到电脑
-adb -s 1901092534000358 pull /sdcard/Movies/ARRecorder/AR_Recording_XXXXXXXX_XXXXXX.mp4 .
+adb -s 1901092534000358 pull /sdcard/Movies/Camera/AR_Recording_XXXXXXXX_XXXXXX.mp4 .
 
 # 播放验证（macOS）
 open AR_Recording_XXXXXXXX_XXXXXX.mp4

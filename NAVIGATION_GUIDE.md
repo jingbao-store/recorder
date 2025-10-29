@@ -113,7 +113,7 @@
 
 **结果**：
 - 录制结束
-- 视频保存到 `/sdcard/Movies/ARRecorder/`
+- 视频保存到 `/sdcard/Movies/Camera/` (与 photoView4rokidglasses 兼容)
 - 返回待机状态
 
 ## 🎮 按键操作总结

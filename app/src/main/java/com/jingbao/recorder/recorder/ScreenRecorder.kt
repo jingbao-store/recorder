@@ -34,6 +34,10 @@ class ScreenRecorder(private val context: Context) {
     fun init(resultCode: Int, data: Intent) {
         Log.d(TAG, "Initializing screen recorder")
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+        if (mediaProjection == null) {
+            Log.e(TAG, "MediaProjection not available (permission data invalid)")
+            throw IllegalStateException("MediaProjection not initialized")
+        }
         
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {

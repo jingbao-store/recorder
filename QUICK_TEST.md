@@ -91,10 +91,10 @@ adb -s 1901092534000358 shell am start -n com.jingbao.recorder/.MainActivity
 ### 步骤 7：查看视频
 ```bash
 # 列出录制的视频
-adb -s 1901092534000358 shell ls -lh /sdcard/Movies/ARRecorder/
+adb -s 1901092534000358 shell ls -lh /sdcard/Movies/Camera/
 
 # 拉取到电脑
-adb -s 1901092534000358 pull /sdcard/Movies/ARRecorder/ ./recordings/
+adb -s 1901092534000358 pull /sdcard/Movies/Camera/AR_Recording_*.mp4 ./recordings/
 ```
 
 ## 🎮 触摸板按键参考

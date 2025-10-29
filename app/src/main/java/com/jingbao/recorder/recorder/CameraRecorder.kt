@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import android.util.Size
 import android.view.Surface
+import android.os.Looper
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
@@ -62,7 +63,8 @@ class CameraRecorder(private val context: Context) {
         surface: Surface,
         width: Int,
         height: Int,
-        useFrontCamera: Boolean = true
+        useFrontCamera: Boolean = true,
+        onResolutionAgreed: ((Int, Int) -> Unit)? = null
     ) {
         val provider = cameraProvider
         if (provider == null) {
@@ -74,11 +76,20 @@ class CameraRecorder(private val context: Context) {
         
         Log.d(TAG, "Starting camera capture: ${width}x${height}, front camera: $useFrontCamera")
         
-        // 选择摄像头
-        val cameraSelector = if (useFrontCamera) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
+        // 选择摄像头（优先前置，若不可用则回退后置；反之亦然）
+        val hasFront = provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
+        val hasBack = provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+        if (!hasFront && !hasBack) {
+            Log.e(TAG, "No available camera can be found on this device")
+            return
+        }
+        val cameraSelector = when {
+            useFrontCamera && hasFront -> CameraSelector.DEFAULT_FRONT_CAMERA
+            !useFrontCamera && hasBack -> CameraSelector.DEFAULT_BACK_CAMERA
+            // 回退逻辑
+            useFrontCamera && !hasFront && hasBack -> CameraSelector.DEFAULT_BACK_CAMERA
+            !useFrontCamera && !hasBack && hasFront -> CameraSelector.DEFAULT_FRONT_CAMERA
+            else -> CameraSelector.DEFAULT_BACK_CAMERA
         }
         
         // 创建预览用例
@@ -88,6 +99,8 @@ class CameraRecorder(private val context: Context) {
         
         preview?.setSurfaceProvider { request: SurfaceRequest ->
             Log.d(TAG, "Providing surface to camera: ${request.resolution}")
+            // 通知上层采用 CameraX 的实际分辨率
+            onResolutionAgreed?.invoke(request.resolution.width, request.resolution.height)
             request.provideSurface(surface, executor) { result ->
                 Log.d(TAG, "Surface usage complete: $result")
             }
@@ -115,8 +128,24 @@ class CameraRecorder(private val context: Context) {
      */
     fun stopCapture() {
         Log.d(TAG, "Stopping camera capture")
-        cameraProvider?.unbindAll()
-        currentSurface = null
+        // CameraX 要求在主线程调用 unbindAll
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cameraProvider?.unbindAll()
+        } else {
+            ContextCompat.getMainExecutor(context).execute {
+                try {
+                    cameraProvider?.unbindAll()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to unbind camera on main thread", e)
+                }
+            }
+        }
+        try {
+            currentSurface?.release()
+        } catch (_: Throwable) {
+        } finally {
+            currentSurface = null
+        }
     }
     
     /**

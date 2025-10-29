@@ -28,7 +28,7 @@
    - **方式 2**：重新打开 AR Recorder 应用，点击停止按钮
 
 5. **查看录制的视频**
-   - 视频自动保存到：`/sdcard/Movies/ARRecorder/`
+   - 视频自动保存到：`/sdcard/Movies/Camera/` (与 photoView4rokidglasses 兼容)
 
 ## 📱 通知栏控制
 
