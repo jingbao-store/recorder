@@ -1,6 +1,7 @@
 package com.jingbao.recorder.viewmodel
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -101,6 +102,30 @@ class RecorderViewModelSimple : ViewModel() {
         )
         
         Log.d(TAG, "Broadcast receivers registered")
+        
+        // ✅ 检查 Service 是否正在运行，如果是则恢复状态
+        if (isRecordingServiceRunning(context)) {
+            Log.d(TAG, "RecordingService is running, restoring state to RECORDING")
+            _recordingState.value = RecordingState.RECORDING
+        }
+    }
+    
+    /**
+     * 检查 RecordingService 是否正在运行
+     */
+    private fun isRecordingServiceRunning(context: Context): Boolean {
+        try {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            @Suppress("DEPRECATION")
+            for (service in manager.getRunningServices(Integer.MAX_VALUE)) {
+                if (RecordingService::class.java.name == service.service.className) {
+                    return true
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking if service is running", e)
+        }
+        return false
     }
     
     /**

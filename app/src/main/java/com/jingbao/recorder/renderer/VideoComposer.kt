@@ -50,12 +50,20 @@ class VideoComposer(private val config: RecordingConfig) {
              1.0f,  1.0f   // 右上
         )
         
-        // 纹理坐标
+        // 纹理坐标（正常）
         private val TEXTURE_COORDS = floatArrayOf(
             0.0f, 1.0f,  // 左下
             1.0f, 1.0f,  // 右下
             0.0f, 0.0f,  // 左上
             1.0f, 0.0f   // 右上
+        )
+        
+        // 纹理坐标（水平翻转 - 用于前置摄像头）
+        private val TEXTURE_COORDS_FLIPPED = floatArrayOf(
+            1.0f, 1.0f,  // 右下 (原左下)
+            0.0f, 1.0f,  // 左下 (原右下)
+            1.0f, 0.0f,  // 右上 (原左上)
+            0.0f, 0.0f   // 左上 (原右上)
         )
     }
     
@@ -73,15 +81,13 @@ class VideoComposer(private val config: RecordingConfig) {
     private val screenTexMatrix = FloatArray(16)
     private val cameraTexMatrix = FloatArray(16)
     
-    // 顶点缓冲
-    private var vertexBuffer: FloatBuffer? = null
-    private var textureBuffer: FloatBuffer? = null
     // 是否启用屏幕输入（当 MediaProjection 不可用时关闭）
     private var screenInputEnabled: Boolean = true
     private var cameraInputWidth: Int = 0
     private var cameraInputHeight: Int = 0
     private var frameCount: Long = 0L
     private var frameDurationNs: Long = 0L
+    private var useFrontCamera: Boolean = true  // 是否使用前置摄像头
     
     /**
      * 初始化 EGL 和 OpenGL
@@ -97,6 +103,14 @@ class VideoComposer(private val config: RecordingConfig) {
     fun disableScreenInput() {
         Log.d(TAG, "Disabling screen input in VideoComposer")
         screenInputEnabled = false
+    }
+    
+    /**
+     * 设置是否使用前置摄像头（用于镜像翻转）
+     */
+    fun setFrontCamera(isFrontCamera: Boolean) {
+        useFrontCamera = isFrontCamera
+        Log.d(TAG, "Front camera mode: $useFrontCamera")
     }
     
     /**
@@ -192,19 +206,6 @@ class VideoComposer(private val config: RecordingConfig) {
         cameraInputWidth = cameraWidth
         cameraInputHeight = cameraHeight
         cameraSurfaceTexture?.setDefaultBufferSize(cameraInputWidth, cameraInputHeight)
-        
-        // 初始化顶点缓冲
-        vertexBuffer = ByteBuffer.allocateDirect(FULL_RECTANGLE_COORDS.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-            .put(FULL_RECTANGLE_COORDS)
-        vertexBuffer?.position(0)
-        
-        textureBuffer = ByteBuffer.allocateDirect(TEXTURE_COORDS.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-            .put(TEXTURE_COORDS)
-        textureBuffer?.position(0)
         
         // 设置视口
         GLES20.glViewport(0, 0, config.videoWidth, config.videoHeight)
@@ -310,7 +311,7 @@ class VideoComposer(private val config: RecordingConfig) {
         
         // 1. 渲染屏幕（全屏），当屏幕输入不可用时仅使用清屏色
         if (screenInputEnabled) {
-            drawTexture(screenTextureId, FULL_RECTANGLE_COORDS, screenTexMatrix)
+            drawTexture(screenTextureId, FULL_RECTANGLE_COORDS, screenTexMatrix, TEXTURE_COORDS)
         }
         
         // 2. 渲染摄像头
@@ -321,7 +322,9 @@ class VideoComposer(private val config: RecordingConfig) {
             // 屏幕输入禁用时，摄像头全屏
             FULL_RECTANGLE_COORDS
         }
-        drawTexture(cameraTextureId, cameraCoords, cameraTexMatrix)
+        // 如果是前置摄像头，使用翻转的纹理坐标来消除镜像
+        val cameraTexCoords = if (useFrontCamera) TEXTURE_COORDS_FLIPPED else TEXTURE_COORDS
+        drawTexture(cameraTextureId, cameraCoords, cameraTexMatrix, cameraTexCoords)
         
         // 严格按帧序号的 CFR 时间戳
         val presentationTimeNs = frameCount * frameDurationNs
@@ -358,13 +361,20 @@ class VideoComposer(private val config: RecordingConfig) {
     /**
      * 绘制纹理
      */
-    private fun drawTexture(textureId: Int, vertexCoords: FloatArray, texMatrix: FloatArray) {
+    private fun drawTexture(textureId: Int, vertexCoords: FloatArray, texMatrix: FloatArray, texCoords: FloatArray) {
         // 更新顶点坐标
         val vb = ByteBuffer.allocateDirect(vertexCoords.size * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
             .put(vertexCoords)
         vb.position(0)
+        
+        // 更新纹理坐标
+        val tb = ByteBuffer.allocateDirect(texCoords.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(texCoords)
+        tb.position(0)
         
         // 绑定纹理
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -377,7 +387,7 @@ class VideoComposer(private val config: RecordingConfig) {
         
         val texCoordHandle = GLES20.glGetAttribLocation(shaderProgram, "aTextureCoord")
         GLES20.glEnableVertexAttribArray(texCoordHandle)
-        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
+        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, tb)
         
         // 纹理矩阵（纠正旋转/镜像/裁切）
         val texMatrixHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexMatrix")

@@ -115,22 +115,14 @@ fun RokidRecorderScreen(
             ) {
                 // 标题 - 一级字号 32px/40px
                 Text(
-                    text = "AR 录制器",
+                    text = "小镜录像",
                     fontSize = 32.sp,
                     lineHeight = 40.sp,
                     fontWeight = FontWeight.Medium,
                     color = RokidGreen
                 )
                 
-                Spacer(modifier = Modifier.height(4.dp))
-                
-                // 副标题 - 三级字号 20px/26px
-                Text(
-                    text = "画中画录制",
-                    fontSize = 20.sp,
-                    lineHeight = 26.sp,
-                    color = Color.White.copy(alpha = 0.6f)
-                )
+                // 副标题删除
             }
             
             // 中间：录制状态和时长

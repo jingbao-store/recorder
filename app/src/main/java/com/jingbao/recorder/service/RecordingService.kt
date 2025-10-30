@@ -16,6 +16,7 @@ import com.jingbao.recorder.recorder.AudioRecorder
 import com.jingbao.recorder.recorder.CameraRecorder
 import com.jingbao.recorder.recorder.ScreenRecorder
 import com.jingbao.recorder.renderer.VideoComposer
+import com.jingbao.recorder.lifecycle.ServiceLifecycleOwner
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CloseableCoroutineDispatcher
 import kotlinx.coroutines.newSingleThreadContext
@@ -96,6 +97,9 @@ class RecordingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val handler = Handler(Looper.getMainLooper())
     
+    // ✅ Service 专用的 LifecycleOwner，不受应用前后台切换影响
+    private val serviceLifecycleOwner = ServiceLifecycleOwner()
+    
     // 录制组件
     private var screenRecorder: ScreenRecorder? = null
     private var cameraRecorder: CameraRecorder? = null
@@ -114,6 +118,10 @@ class RecordingService : Service() {
         super.onCreate()
         Log.d(TAG, "Service created")
         createNotificationChannel()
+        
+        // ✅ 启动 Service 生命周期
+        serviceLifecycleOwner.start()
+        Log.d(TAG, "ServiceLifecycleOwner started, state: ${serviceLifecycleOwner.getCurrentState()}")
         
         // ✅ 延迟初始化录制组件，避免阻塞 onCreate
         screenRecorder = ScreenRecorder(this)
@@ -159,6 +167,11 @@ class RecordingService : Service() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
         stopRecordingInternal()
+        
+        // ✅ 停止 Service 生命周期
+        serviceLifecycleOwner.stop()
+        Log.d(TAG, "ServiceLifecycleOwner stopped")
+        
         serviceScope.cancel()
         glDispatcher?.close()
         glDispatcher = null
@@ -230,18 +243,26 @@ class RecordingService : Service() {
                 
                 // 启动摄像头录制（在主线程）：在 CameraX 就绪回调中启动，避免 provider 未就绪
                 handler.post {
-                    val lifecycleOwner = androidx.lifecycle.ProcessLifecycleOwner.get()
+                    // ✅ 使用 ServiceLifecycleOwner 替代 ProcessLifecycleOwner
+                    // 这样相机不会因为应用进入后台而被释放
                     val cameraSurface = videoComposer!!.getCameraSurface()
-                    cameraRecorder?.init(lifecycleOwner) {
+                    val useFrontCamera = true
+                    // 设置前置摄像头标志（用于镜像翻转修正）
+                    glDispatcher?.let { dispatcher ->
+                        serviceScope.launch(dispatcher) {
+                            videoComposer?.setFrontCamera(useFrontCamera)
+                        }
+                    }
+                    cameraRecorder?.init(serviceLifecycleOwner) {
                         Log.d(TAG, "Camera ready in service")
                         val reqW = if (screenInputEnabled) (config.videoWidth * config.pipWidthRatio).toInt() else config.videoWidth
                         val reqH = if (screenInputEnabled) (config.videoHeight * config.pipHeightRatio).toInt() else config.videoHeight
                         cameraRecorder?.startCapture(
-                            lifecycleOwner,
+                            serviceLifecycleOwner,
                             cameraSurface,
                             reqW,
                             reqH,
-                            useFrontCamera = true
+                            useFrontCamera = useFrontCamera
                         ) { agreedW, agreedH ->
                             // 同步摄像头输入 SurfaceTexture 的默认缓冲尺寸，避免 abandoned
                             glDispatcher?.let { dispatcher ->
